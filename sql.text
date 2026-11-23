@@ -1,0 +1,267 @@
+ambil krs
+
+DELIMITER $$
+
+CREATE PROCEDURE sp_ambil_krs(
+    IN p_nim VARCHAR(15),
+    IN p_id_kelas INT
+)
+BEGIN
+    -- Cek apakah sudah pernah ambil kelas ini
+    IF EXISTS (
+        SELECT 1 FROM krs WHERE nim = p_nim AND id_kelas = p_id_kelas
+    ) THEN
+        SELECT 'GAGAL: Kelas sudah pernah diambil' AS pesan;
+    ELSE
+        INSERT INTO krs (nim, id_kelas) VALUES (p_nim, p_id_kelas);
+        SELECT 'BERHASIL: KRS ditambahkan' AS pesan;
+    END IF;
+END$$
+
+DELIMITER ;
+
+CALL sp_ambil_krs('2021001', 1);
+CALL sp_ambil_krs('2021001', 1);  -- kedua kali → GAGAL
+
+//Setujui krs
+
+DELIMITER $$
+
+CREATE PROCEDURE sp_setujui_krs(IN p_id_krs INT)
+BEGIN
+    DECLARE v_status VARCHAR(20);
+
+    -- Ambil status sekarang
+    SELECT status INTO v_status FROM krs WHERE id_krs = p_id_krs;
+
+    IF v_status = 'DIAJUKAN' THEN
+        UPDATE krs SET status = 'DISETUJUI' WHERE id_krs = p_id_krs;
+        SELECT 'KRS disetujui' AS pesan;
+    ELSE
+        SELECT CONCAT('GAGAL: Status sekarang = ', v_status) AS pesan;
+    END IF;
+END$$
+
+DELIMITER ;
+
+Konversi Nilai angka
+
+DELIMITER $$
+
+CREATE FUNCTION fn_huruf(p_angka DECIMAL(5,2))
+RETURNS CHAR(2)
+DETERMINISTIC
+BEGIN
+    DECLARE hasil CHAR(2);
+
+    IF p_angka >= 85 THEN SET hasil = 'A';
+    ELSEIF p_angka >= 75 THEN SET hasil = 'B';
+    ELSEIF p_angka >= 65 THEN SET hasil = 'C';
+    ELSEIF p_angka >= 50 THEN SET hasil = 'D';
+    ELSE SET hasil = 'E';
+    END IF;
+
+    RETURN hasil;
+END$$
+
+DELIMITER ;
+
+SELECT fn_huruf(85) AS hasil;   -- hasil: A
+SELECT fn_huruf(72) AS hasil;   -- hasil: B
+SELECT fn_huruf(45) AS hasil;   -- hasil: E
+
+// nilai angka bobot
+
+DELIMITER $$
+
+CREATE FUNCTION fn_bobot(p_angka DECIMAL(5,2))
+RETURNS DECIMAL(3,2)
+DETERMINISTIC
+BEGIN
+    DECLARE hasil DECIMAL(3,2);
+
+    IF p_angka >= 85 THEN SET hasil = 4.00;
+    ELSEIF p_angka >= 75 THEN SET hasil = 3.00;
+    ELSEIF p_angka >= 65 THEN SET hasil = 2.00;
+    ELSEIF p_angka >= 50 THEN SET hasil = 1.00;
+    ELSE SET hasil = 0.00;
+    END IF;
+
+    RETURN hasil;
+END$$
+
+DELIMITER ;
+
+//Hitung IPK
+
+DELIMITER $$
+
+CREATE FUNCTION fn_hitung_ipk(p_nim VARCHAR(15))
+RETURNS DECIMAL(3,2)
+READS SQL DATA
+BEGIN
+    DECLARE v_ipk DECIMAL(3,2);
+
+    SELECT IFNULL(
+        SUM(mk.sks * n.bobot) / NULLIF(SUM(mk.sks), 0),
+        0
+    ) INTO v_ipk
+    FROM krs k
+    JOIN kelas kls      ON kls.id_kelas = k.id_kelas
+    JOIN matakuliah mk  ON mk.kode = kls.kode_mk
+    JOIN nilai n        ON n.id_krs = k.id_krs
+    WHERE k.nim = p_nim AND n.publish = 1;
+
+    RETURN ROUND(v_ipk, 2);
+END$$
+
+DELIMITER ;
+
+SELECT fn_hitung_ipk('2021001') AS ipk;
+
+
+//Trigger 
+ auto isi huruf dan angka
+DELIMITER $$
+
+CREATE TRIGGER trg_nilai_sebelum_insert
+BEFORE INSERT ON nilai
+FOR EACH ROW
+BEGIN
+    SET NEW.huruf = fn_huruf(NEW.angka);
+    SET NEW.bobot = fn_bobot(NEW.angka);
+END$$
+
+DELIMITER ;
+
+-- Tidak perlu isi huruf & bobot — trigger otomatis mengisi
+INSERT INTO nilai (id_krs, angka, publish) VALUES (1, 85, 1);
+SELECT * FROM nilai WHERE id_krs = 1;
+-- hasil: huruf=A, bobot=4.00 (otomatis)
+
+//auto update nilai
+DELIMITER $$
+
+CREATE TRIGGER trg_nilai_setelah_update
+AFTER UPDATE ON nilai
+FOR EACH ROW
+BEGIN
+    DECLARE v_nim VARCHAR(15);
+
+    -- Hanya jalankan kalau nilai baru saja dipublish
+    IF NEW.publish = 1 THEN
+        SELECT nim INTO v_nim FROM krs WHERE id_krs = NEW.id_krs;
+        UPDATE mahasiswa
+           SET ipk = fn_hitung_ipk(v_nim)
+         WHERE nim = v_nim;
+    END IF;
+END$$
+
+DELIMITER ;
+
+-- Cek IPK sebelum
+SELECT nim, ipk FROM mahasiswa WHERE nim = '2021001';
+
+-- Publish nilai
+UPDATE nilai SET publish = 1 WHERE id_krs = 1;
+
+-- Cek IPK sesudah (otomatis berubah)
+SELECT nim, ipk FROM mahasiswa WHERE nim = '2021001';
+
+//Trigger log perubahan
+
+CREATE TABLE log_krs (
+    id_log    INT AUTO_INCREMENT PRIMARY KEY,
+    id_krs    INT,
+    status_lama VARCHAR(20),
+    status_baru VARCHAR(20),
+    waktu     DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+DELIMITER $$
+
+CREATE TRIGGER trg_krs_ubah_status
+AFTER UPDATE ON krs
+FOR EACH ROW
+BEGIN
+    IF OLD.status <> NEW.status THEN
+        INSERT INTO log_krs (id_krs, status_lama, status_baru)
+        VALUES (NEW.id_krs, OLD.status, NEW.status);
+    END IF;
+END$$
+
+DELIMITER ;
+
+CALL sp_setujui_krs(1);
+SELECT * FROM log_krs;
+
+
+// join TABLE
+
+SELECT
+    k.id_krs,
+    m.nim,
+    u.nama       AS nama_mahasiswa,
+    mk.nama      AS mata_kuliah,
+    mk.sks,
+    k.status
+FROM krs k
+JOIN mahasiswa m   ON m.nim = k.nim
+JOIN users u       ON u.id = m.id_user
+JOIN kelas kls     ON kls.id_kelas = k.id_kelas
+JOIN matakuliah mk ON mk.kode = kls.kode_mk
+ORDER BY k.id_krs;
+
+//group by total sks
+
+SELECT
+    m.nim,
+    u.nama,
+    COUNT(k.id_krs)   AS jumlah_mk,
+    SUM(mk.sks)       AS total_sks
+FROM mahasiswa m
+JOIN users u       ON u.id = m.id_user
+LEFT JOIN krs k    ON k.nim = m.nim AND k.status = 'DISETUJUI'
+LEFT JOIN kelas kls      ON kls.id_kelas = k.id_kelas
+LEFT JOIN matakuliah mk  ON mk.kode = kls.kode_mk
+GROUP BY m.nim, u.nama;
+
+//sub query 
+
+SELECT nim, ipk
+FROM mahasiswa
+WHERE ipk > (SELECT AVG(ipk) FROM mahasiswa);
+
+// update + join
+UPDATE nilai n
+JOIN krs k ON k.id_krs = n.id_krs
+SET n.publish = 1
+WHERE k.nim = '2021001' AND n.angka IS NOT NULL;
+
+//laporan kHS
+SELECT
+    mk.nama    AS mata_kuliah,
+    mk.sks,
+    n.angka,
+    n.huruf,
+    n.bobot,
+    (mk.sks * n.bobot) AS mutu
+FROM krs k
+JOIN kelas kls     ON kls.id_kelas = k.id_kelas
+JOIN matakuliah mk ON mk.kode = kls.kode_mk
+JOIN nilai n       ON n.id_krs = k.id_krs
+WHERE k.nim = '2021001' AND n.publish = 1;
+
+//rekp nilai
+SELECT
+    mk.nama             AS mata_kuliah,
+    COUNT(n.id_nilai)   AS jumlah_mahasiswa,
+    AVG(n.angka)        AS rata_rata,
+    MAX(n.angka)        AS nilai_tertinggi,
+    MIN(n.angka)        AS nilai_terendah
+FROM nilai n
+JOIN krs k         ON k.id_krs = n.id_krs
+JOIN kelas kls     ON kls.id_kelas = k.id_kelas
+JOIN matakuliah mk ON mk.kode = kls.kode_mk
+WHERE n.publish = 1
+GROUP BY mk.kode, mk.nama;
